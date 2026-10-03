@@ -4,6 +4,8 @@ export type CameraAngle = '正面' | '左侧 45°' | '右侧 45°' | '俯拍手�
 export type CaptionPosition = '下方安全区' | '上移 15%' | '角标提示' | '画面中央';
 export type GestureZone = '左侧' | '中央' | '右侧';
 
+export type Role = 'leader' | 'teacher';
+
 export interface LessonStep {
   id: string;
   title: string;
@@ -33,25 +35,136 @@ export interface CourseModule {
   steps: LessonStep[];
 }
 
-export interface FrozenVersion {
-  id: string;
+/* ---------------- 共享课程库 ---------------- */
+
+export type LibraryCourseStatus = 'draft' | 'published';
+
+export interface CourseVersion {
+  version: number;
   label: string;
-  createdAt: string;
-  snapshot: Omit<CourseProject, 'frozenVersions'>;
+  publishedAt: string;
+  note: string;
+  modules: CourseModule[];
 }
 
-export interface CourseProject {
+export interface LibraryCourse {
   id: string;
   title: string;
-  teacher: string;
   audience: string;
-  status: CourseStatus;
-  selectedModuleId: string;
-  selectedStepId: string;
-  modules: CourseModule[];
-  frozenVersions: FrozenVersion[];
+  color: string;
+  /** 教研组长维护中的标准课程草稿，发布后固化为 CourseVersion */
+  draftModules: CourseModule[];
+  status: LibraryCourseStatus;
+  versions: CourseVersion[];
+  publishedVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/* ---------------- 老师个人课程 ---------------- */
+
+/** clean：未改动，随库升级；modified：老师改过；conflict：库也改了同一处，等老师裁定；new：老师自建 */
+export type StepState = 'clean' | 'modified' | 'conflict' | 'new';
+export type ModuleState = 'clean' | 'modified' | 'new';
+
+export interface PersonalStep extends LessonStep {
+  /** 库中对应步骤 id；老师自建步骤为空字符串 */
+  sourceStepId: string;
+  state: StepState;
+  /** 库里的对应步骤已被删除，但老师本地改过，保留待老师决定 */
+  upstreamDeleted?: boolean;
+  /** 升级后两版都动过：库的新版本摆在这里，等老师裁定 */
+  upstreamStep?: LessonStep;
+  /** 最近一次成功回灌时的内容指纹；没有新改动的步骤不再重复进申请 */
+  backfilledSignature?: string;
+}
+
+export interface PersonalModule {
+  id: string;
+  sourceModuleId: string;
+  title: string;
+  summary: string;
+  color: string;
+  state: ModuleState;
+  steps: PersonalStep[];
+  /** 老师主动删掉的库步骤，升级时不再补回 */
+  droppedStepIds?: string[];
+  /** 库里整个模块已删除，但老师本地改过，保留待老师决定 */
+  upstreamDeleted?: boolean;
+}
+
+export interface TeacherCopy {
+  id: string;
+  libraryCourseId: string;
+  title: string;
+  teacherId: string;
+  teacherName: string;
+  audience: string;
+  color: string;
+  /** 取课时对应的库版本；升级到冲突全部裁定后再推进 */
+  sourceVersion: number;
+  modules: PersonalModule[];
   lastSavedAt: string;
   revision: number;
+  lastSyncNotice?: string;
+}
+
+/* ---------------- 回灌申请 ---------------- */
+
+export type BackfillItemState = 'queued' | 'applied' | 'failed';
+
+export interface BackfillItem {
+  id: string;
+  /** 该步骤在老师副本里的 id，回写同步状态用 */
+  copyStepId: string;
+  copyId: string;
+  sourceModuleId: string;
+  moduleTitle: string;
+  sourceStepId: string;
+  /** 申请时的步骤内容快照 */
+  step: LessonStep;
+  /** 老师自建步骤回灌成功后，库里分配给它的新步骤 id */
+  assignedLibraryStepId?: string;
+  /** 申请时的内容指纹，成功后回写到副本，避免同一内容重复回灌 */
+  signature: string;
+  /** 插入位置提示：排在哪个步骤之后（空表示排到模块末尾） */
+  afterStepId: string;
+  state: BackfillItemState;
+  message?: string;
+}
+
+export type BackfillRequestStatus = 'pending' | 'applied' | 'rejected';
+
+export interface BackfillRequest {
+  id: string;
+  libraryCourseId: string;
+  copyId: string;
+  courseTitle: string;
+  teacherId: string;
+  teacherName: string;
+  note: string;
+  createdAt: string;
+  status: BackfillRequestStatus;
+  items: BackfillItem[];
+}
+
+/* ---------------- 工作区（本地持久化） ---------------- */
+
+export interface WorkspaceUser {
+  id: string;
+  name: string;
+  role: Role;
+}
+
+export interface Workspace {
+  schema: 2;
+  currentUserId: string;
+  users: WorkspaceUser[];
+  library: LibraryCourse[];
+  copies: TeacherCopy[];
+  backfills: BackfillRequest[];
+  /** 课程库是否可写（离线/故障模拟）；个人副本始终可在本地编辑 */
+  libraryOnline: boolean;
 }
 
 export interface ValidationCheck {
@@ -63,9 +176,12 @@ export interface ValidationCheck {
   moduleId?: string;
 }
 
-export const STORAGE_KEY = 'sologsb-1012-sign-course-project-v1';
+export const LEGACY_STORAGE_KEY = 'sologsb-1012-sign-course-project-v1';
+export const WORKSPACE_STORAGE_KEY = 'sologsb-1012-workspace-v2';
 
-export function createDemoProject(): CourseProject {
+/* ---------------- 示例数据 ---------------- */
+
+export function createDemoModules(): CourseModule[] {
   const modules: CourseModule[] = [
     {
       id: 'module-1',
@@ -103,7 +219,7 @@ export function createDemoProject(): CourseProject {
           handshape: '四指并拢，拇指张开；掌心朝左前侧',
           gestureZone: '中央',
           caption: '注意四指并拢，动作沿身体中轴向前。',
-          captionPosition: '画面中央',
+          captionPosition: '下方安全区',
           camera: '俯拍手部',
           commonMistakes: ['拇指贴住掌心', '动作方向偏向一侧'],
           exercise: '固定肩部，只移动前臂完成五次。',
@@ -127,7 +243,7 @@ export function createDemoProject(): CourseProject {
           camera: '全身远景',
           commonMistakes: ['动作过早结束', '两人视线没有相遇'],
           exercise: '两人一组轮流完成问候，交换三次。',
-          exerciseFeedback: '同伴负责确认视线和动作停顿。',
+          exerciseFeedback: '同伴负责确认视线和停顿。',
           altText: '两名学习者相对站立，交替做出问候动作并看向对方。',
           prerequisiteId: 'step-1-2',
           difficulty: '进阶',
@@ -184,37 +300,80 @@ export function createDemoProject(): CourseProject {
       ],
     },
   ];
+  return modules;
+}
 
-  return {
-    id: 'sign-course-project',
-    title: '零基础手语 · 问候与数量',
-    teacher: '陈老师 / 特殊教育中心',
-    audience: '初次接触手语的初中学习者',
-    status: 'draft',
-    selectedModuleId: 'module-1',
-    selectedStepId: 'step-1-2',
-    modules,
-    frozenVersions: [],
-    lastSavedAt: new Date().toISOString(),
-    revision: 1,
+/** 兼容旧版本读取：v1 本地稿结构（迁移后删除） */
+export interface LegacyProject {
+  id?: string;
+  title?: string;
+  teacher?: string;
+  audience?: string;
+  status?: CourseStatus;
+  modules?: CourseModule[];
+  frozenVersions?: { id: string; label: string; createdAt: string; snapshot: { title?: string; audience?: string; modules: CourseModule[] } }[];
+  lastSavedAt?: string;
+}
+
+/* ---------------- 内容比较 ---------------- */
+
+const STEP_CONTENT_KEYS: (keyof LessonStep)[] = [
+  'title', 'kind', 'duration', 'demoTitle', 'demoUrl', 'handshape', 'gestureZone',
+  'caption', 'captionPosition', 'camera', 'commonMistakes', 'exercise',
+  'exerciseFeedback', 'altText', 'prerequisiteId', 'difficulty', 'cuePoints',
+];
+
+export function stepsContentEqual(a: LessonStep, b: LessonStep): boolean {
+  return STEP_CONTENT_KEYS.every((key) => {
+    const av = a[key] as unknown;
+    const bw = b[key] as unknown;
+    return typeof av === 'object' ? JSON.stringify(av) === JSON.stringify(bw) : av === bw;
+  });
+}
+
+/** 学习步骤的内容指纹，用于判断回灌后是否又有新改动 */
+export function stepSignature(step: LessonStep): string {
+  return JSON.stringify(STEP_CONTENT_KEYS.map((key) => step[key]));
+}
+
+export function stepDiffFields(a: LessonStep, b: LessonStep): { key: keyof LessonStep; label: string }[] {
+  const labels: Record<string, string> = {
+    title: '标题', kind: '类型', duration: '时长', demoTitle: '示范片段', handshape: '手形说明',
+    gestureZone: '动作区域', caption: '字幕', captionPosition: '字幕位置', camera: '镜头角度',
+    commonMistakes: '常见错误', exercise: '练习任务', exerciseFeedback: '练习反馈',
+    altText: '替代文本', prerequisiteId: '前置步骤', difficulty: '难度', cuePoints: '检查点',
   };
+  return STEP_CONTENT_KEYS
+    .filter((key) => {
+      const av = a[key] as unknown;
+      const bv = b[key] as unknown;
+      return typeof av === 'object' || typeof bv === 'object'
+        ? JSON.stringify(av) !== JSON.stringify(bv)
+        : av !== bv;
+    })
+    .map((key) => ({ key, label: labels[key] ?? String(key) }));
 }
 
-export function selectedModule(project: CourseProject): CourseModule {
-  return project.modules.find((module) => module.id === project.selectedModuleId) ?? project.modules[0];
+/** 便于差异面板展示的字段值 */
+export function formatStepField(step: LessonStep, key: keyof LessonStep): string {
+  const value = step[key];
+  if (Array.isArray(value)) return value.length ? value.join('、') : '（空）';
+  if (key === 'prerequisiteId') {
+    if (!value) return '无前置条件';
+    return `步骤 ${String(value)}`;
+  }
+  if (value === '' || value === undefined || value === null) return '（空）';
+  return String(value);
 }
 
-export function selectedStep(project: CourseProject): LessonStep | undefined {
-  const module = selectedModule(project);
-  return module?.steps.find((step) => step.id === project.selectedStepId) ?? module?.steps[0];
-}
+/* ---------------- 校验 ---------------- */
 
-export function validateProject(project: CourseProject): ValidationCheck[] {
+export function validateCourse(title: string, modules: CourseModule[]): ValidationCheck[] {
   const checks: ValidationCheck[] = [];
-  if (!project.title.trim()) checks.push({ id: 'title', severity: 'error', title: '课程标题缺失', detail: '发布前需要为课程填写清晰标题。' });
-  if (project.modules.length === 0) checks.push({ id: 'modules', severity: 'error', title: '没有课程模块', detail: '至少需要创建一个包含学习步骤的模块。' });
+  if (!title.trim()) checks.push({ id: 'title', severity: 'error', title: '课程标题缺失', detail: '发布前需要为课程填写清晰标题。' });
+  if (modules.length === 0) checks.push({ id: 'modules', severity: 'error', title: '没有课程模块', detail: '至少需要创建一个包含学习步骤的模块。' });
 
-  project.modules.forEach((module) => {
+  modules.forEach((module) => {
     if (!module.steps.length) {
       checks.push({ id: `empty-${module.id}`, severity: 'error', title: `${module.title} 没有学习步骤`, detail: '空模块无法进入复核。', moduleId: module.id });
     }
@@ -251,6 +410,34 @@ export function validateProject(project: CourseProject): ValidationCheck[] {
   return checks;
 }
 
-export function cloneProject(project: CourseProject): CourseProject {
-  return structuredClone(project);
+export function cloneData<T>(value: T): T {
+  return structuredClone(value);
+}
+
+/** 去掉个人副本的归属/状态字段，只留步骤内容，用于回灌 */
+export function toLessonStep(step: PersonalStep): LessonStep {
+  return {
+    id: step.id,
+    title: step.title,
+    kind: step.kind,
+    duration: step.duration,
+    demoTitle: step.demoTitle,
+    demoUrl: step.demoUrl,
+    handshape: step.handshape,
+    gestureZone: step.gestureZone,
+    caption: step.caption,
+    captionPosition: step.captionPosition,
+    camera: step.camera,
+    commonMistakes: cloneData(step.commonMistakes),
+    exercise: step.exercise,
+    exerciseFeedback: step.exerciseFeedback,
+    altText: step.altText,
+    prerequisiteId: step.prerequisiteId,
+    difficulty: step.difficulty,
+    cuePoints: cloneData(step.cuePoints),
+  };
+}
+
+export function uid(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
